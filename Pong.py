@@ -227,83 +227,125 @@ class HumanPlayer(Player):
 # DO NOT MODIFY CODE ABOVE THIS LINE
 # ----------------------------------
 
-# import numpy as np
-# import matplotlib.pyplot as plt
+import numpy as np
+import matplotlib.pyplot as plt
 
 
 class FuzzyPlayer(Player):
     def __init__(self, racket: Racket, ball: Ball, board: Board):
         super(FuzzyPlayer, self).__init__(racket, ball, board)
-        # for Mamdami:
-        # x_dist = fuzz.control.Antecedent...
-        # y_dist = fuzz.control.Antecedent...
-        # velocity = fuzz.control.Consequent...
-        # self.racket_controller = fuzz.control.ControlSystem...
 
-        # visualize Mamdami
-        # x_dist.view()
-        # ...
+        self.W = float(self.board.surface.get_width())
+        self.H = float(self.board.surface.get_height())
+        self.VMAX = float(self.racket.max_speed)
+        self.PW = float(self.racket.width)
 
-        # for TSK:
-        # self.x_universe = np.arange...
-        # self.x_mf = {
-        #     "far_left": fuzz.trapmf(
-        #         self.x_universe,
-        #         [
-        #             ...
-        #         ],
-        #     ),
-        #     ...
-        # }
-        # ...
-        # self.velocity_fx = {
-        #     "f_slow_left": lambda x_diff, y_diff: -1 * (abs(x_diff) + y_diff),
-        #     ...
-        # }
+        self.x_universe = np.linspace(-self.W/2, self.W/2, int(self.W) + 1)
+        self.y_universe = np.linspace(0, self.H, int(self.H) + 1)
 
-        # visualize TSK
-        # plt.figure()
-        # for name, mf in self.x_mf.items():
-        #     plt.plot(self.x_universe, mf, label=name)
-        # plt.legend()
-        # plt.show()
-        # ...
+        span = self.W / 2.0
+
+        self.x_mf = {
+            "far_right": fuzz.trapmf(self.x_universe, [-span, -span, -0.22*span, -0.14*span]),
+            "right":     fuzz.trimf( self.x_universe,  [-0.18*span, -0.09*span, -0.035*span]),
+            "center":    fuzz.trimf( self.x_universe,  [ -0.05*span, 0.0, 0.05*span]),
+            "left":      fuzz.trimf( self.x_universe,  [  0.035*span, 0.09*span, 0.18*span]),
+            "far_left":  fuzz.trapmf(self.x_universe,  [  0.14*span, 0.22*span,  span,       span]),
+        }
+
+        self.y_mf = {
+            "near": fuzz.trapmf(self.y_universe, [0, 0,            0.30*self.H, 0.55*self.H]),
+            "mid":  fuzz.trimf( self.y_universe, [0.48*self.H,     0.68*self.H, 0.85*self.H]),
+            "far":  fuzz.trapmf(self.y_universe, [0.78*self.H,     0.92*self.H, self.H,     self.H]),
+        }
+
+        V = self.VMAX
+        self.velocity_fx = {
+            "fast_left":   lambda xd, yd: -1.00 * V,
+            "mid_left":    lambda xd, yd: -0.90 * V,
+            "drift_left":  lambda xd, yd: -0.70 * V,
+
+            "stop":        lambda xd, yd:  0.0,
+
+            "drift_right": lambda xd, yd:  0.70 * V,
+            "mid_right":   lambda xd, yd:  0.90 * V,
+            "fast_right":  lambda xd, yd:  1.00 * V,
+        }
+
+        self.dead_x   = 1.2
+        self.cutoff_v = 0.10
+        self._prev_y_abs = None
+        self._boost_gain = 1.10
+
+    def _mf_x_map(self, x_val: float):
+        return {n: fuzz.interp_membership(self.x_universe, mf, x_val)
+                for n, mf in self.x_mf.items()}
+
+    def _mf_y_map(self, y_abs: float):
+        return {n: fuzz.interp_membership(self.y_universe, mf, y_abs)
+                for n, mf in self.y_mf.items()}
+
+    def _edge_shift(self, y_abs: float, x_val: float) -> float:
+        y = self._mf_y_map(y_abs)
+        w = 0.9*y["near"] + 0.4*y["mid"] + 0.05*y["far"]
+        base = 0.25 * self.PW
+        shift = w * base
+        return np.copysign(shift, x_val)
+
+    def _tsk_velocity(self, x_val: float, y_abs: float) -> float:
+        x_edge = x_val - self._edge_shift(y_abs, x_val)
+
+        x = self._mf_x_map(x_edge)
+        y = self._mf_y_map(y_abs)
+        f = self.velocity_fx
+
+        rules = []
+
+        rules.append( (x["far_left"],  f["fast_left"]) )
+        rules.append( (x["far_right"], f["fast_right"]) )
+
+        rules.append( (min(x["left"],  y["near"]),  f["fast_left"]) )
+        rules.append( (min(x["right"], y["near"]),  f["fast_right"]) )
+
+        rules.append( (min(x["left"],  y["mid"]),   f["mid_left"]) )
+        rules.append( (min(x["right"], y["mid"]),   f["mid_right"]) )
+
+        rules.append( (min(x["left"],  y["far"]),   f["drift_left"]) )
+        rules.append( (min(x["right"], y["far"]),   f["drift_right"]) )
+
+        rules.append( (x["center"], f["stop"]) )
+
+        num = 0.0; den = 0.0
+        for w_act, fx in rules:
+            if w_act <= 0.0:
+                continue
+            z = fx(x_edge, y_abs)
+            num += w_act * z
+            den += w_act
+
+        v = 0.0 if den <= 1e-9 else num/den
+        if abs(v) < self.cutoff_v:
+            v = 0.0
+        return float(v)
 
     def act(self, x_diff: int, y_diff: int):
-        velocity = self.make_decision(x_diff, y_diff)
-        self.move(self.racket.rect.x + velocity)
+        x_val = float(x_diff)
+        y_abs = float(abs(y_diff))
 
-    def make_decision(self, x_diff: int, y_diff: int):
-        # for Mamdami:
-        # self.racket_controller.compute()
-        # velocity = self.racket_controller.o..
+        if abs(x_val) < self.dead_x:
+            v = 0.0
+        else:
+            v = self._tsk_velocity(x_val, y_abs)
 
-        # for TSK:
-        # x_vals = {
-        #     name: fuzz.interp_membership(self.x_universe, mf, x_diff)
-        #     for name, mf in self.x_mf.items()
-        # }
-        # ...
-        # rule activations with Zadeh norms
-        # activations = {
-        #     "f_slow_left": max(
-        #         [
-        #             min(x_vals...),
-        #             min(x_vals...),
-        #         ]
-        #     ),
-        #     ...
-        # }
+        if self._prev_y_abs is not None and v != 0.0 and abs(x_val) >= self.dead_x:
+            if y_abs < self._prev_y_abs - 0.001:
+                v *= self._boost_gain
+                v = max(-self.VMAX, min(self.VMAX, v))
 
-        # velocity = sum(
-        #     activations[val] * self.velocity_fx[val](x_diff, y_diff)
-        #     for val in activations
-        # ) / sum(activations[val] for val in activations)
-
-        return 0
+        self._prev_y_abs = y_abs
+        self.move(self.racket.rect.x + v)
 
 
 if __name__ == "__main__":
-    game = PongGame(800, 400, NaiveOponent, HumanPlayer)
-    # game = PongGame(800, 400, NaiveOponent, FuzzyPlayer)
+    game = PongGame(800, 400, NaiveOponent, FuzzyPlayer)
     game.run()
