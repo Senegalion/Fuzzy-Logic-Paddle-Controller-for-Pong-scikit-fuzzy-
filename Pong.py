@@ -117,7 +117,7 @@ class Racket(Drawable):
         width: int = 80,
         height: int = 20,
         color=(255, 255, 255),
-        max_speed: int = 20,
+        max_speed: int = 10,
     ):
         super(Racket, self).__init__(x, y, width, height, color)
         self.max_speed = max_speed
