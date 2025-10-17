@@ -41,7 +41,7 @@ class Ball(Drawable):
         self,
         x: int,
         y: int,
-        radius: int = 20,
+        radius: int = 10,
         color=(255, 10, 0),
         speed: int = 3,
     ):
@@ -117,7 +117,7 @@ class Racket(Drawable):
         width: int = 80,
         height: int = 20,
         color=(255, 255, 255),
-        max_speed: int = 10,
+        max_speed: int = 20,
     ):
         super(Racket, self).__init__(x, y, width, height, color)
         self.max_speed = max_speed
@@ -230,6 +230,88 @@ class HumanPlayer(Player):
 import numpy as np
 import matplotlib.pyplot as plt
 
+class MamdamiPlayer(Player):
+    def __init__(self, racket: Racket, ball: Ball, board: Board):
+        super().__init__(racket, ball, board)
+
+        self.W = float(self.board.surface.get_width())
+        self.H = float(self.board.surface.get_height())
+        self.VMAX = float(self.racket.max_speed)
+
+        self.x_universe = np.linspace(-self.W/2, self.W/2, int(self.W) + 1)
+        self.y_universe = np.linspace(0, self.H, int(self.H) + 1)
+        self.v_universe = np.linspace(-self.VMAX, self.VMAX, 1001)
+
+        span = self.W / 2.0
+        V    = self.VMAX
+
+        x_dist = fuzzcontrol.Antecedent(self.x_universe, 'x_dist')
+        y_dist = fuzzcontrol.Antecedent(self.y_universe, 'y_dist')
+        velocity = fuzzcontrol.Consequent(self.v_universe, 'velocity')
+
+        x_dist['right']  = fuzz.trapmf(self.x_universe, [-span, -span, -0.08*span, -0.01*span])
+        x_dist['center'] = fuzz.trimf( self.x_universe,  [ -0.05*span, 0.0, 0.05*span])
+        x_dist['left']   = fuzz.trapmf(self.x_universe,  [  0.01*span, 0.08*span,  span,       span])
+
+        y_dist['near'] = fuzz.trapmf(self.y_universe, [0, 0,          0.30*self.H, 0.55*self.H])
+        y_dist['mid']  = fuzz.trimf( self.y_universe, [0.48*self.H,   0.68*self.H, 0.85*self.H])
+        y_dist['far']  = fuzz.trapmf(self.y_universe, [0.78*self.H,   0.92*self.H, self.H,     self.H])
+
+        velocity['left']   = fuzz.trapmf(self.v_universe, [-V, -V, -0.55*V, -0.15*V])
+        velocity['stop']   = fuzz.trimf( self.v_universe, [-0.08*V, 0.0, 0.08*V])
+        velocity['right']  = fuzz.trapmf(self.v_universe, [ 0.15*V, 0.55*V,  V,     V])
+
+        velocity.defuzzify_method = 'centroid'
+
+        rules = [
+            fuzzcontrol.Rule(x_dist['left']  & y_dist['near'], velocity['left']),
+            fuzzcontrol.Rule(x_dist['left']  & y_dist['mid'],  velocity['left']),
+            fuzzcontrol.Rule(x_dist['left']  & y_dist['far'],  velocity['left']),
+
+            fuzzcontrol.Rule(x_dist['right'] & y_dist['near'], velocity['right']),
+            fuzzcontrol.Rule(x_dist['right'] & y_dist['mid'],  velocity['right']),
+            fuzzcontrol.Rule(x_dist['right'] & y_dist['far'],  velocity['right']),
+
+            fuzzcontrol.Rule(x_dist['center'] & y_dist['near'], velocity['stop']),
+            fuzzcontrol.Rule(x_dist['center'] & y_dist['mid'],  velocity['stop']),
+            fuzzcontrol.Rule(x_dist['center'] & y_dist['far'],  velocity['stop']),
+        ]
+
+        self.system = fuzzcontrol.ControlSystem(rules)
+        self.sim = fuzzcontrol.ControlSystemSimulation(self.system, flush_after_run=1)
+
+        self.dead_x   = 1.2
+        self.cutoff_v = 0.10 * self.VMAX
+        self._prev_y_abs = None
+        self._boost_gain = 1.10
+
+    def make_decision(self, x_val: float, y_abs: float) -> float:
+        self.sim.input['x_dist'] = float(x_val)
+        self.sim.input['y_dist'] = float(y_abs)
+        self.sim.compute()
+        v = float(self.sim.output['velocity'])
+
+        if abs(v) < self.cutoff_v:
+            v = 0.0
+        return max(-self.VMAX, min(self.VMAX, v))
+
+    def act(self, x_diff: int, y_diff: int):
+        x_val = float(x_diff)
+        y_abs = float(abs(y_diff))
+
+        if abs(x_val) < self.dead_x:
+            v = 0.0
+        else:
+            v = self.make_decision(x_val, y_abs)
+
+        if self._prev_y_abs is not None and v != 0.0 and abs(x_val) >= self.dead_x:
+            if y_abs < self._prev_y_abs - 0.001:
+                v *= self._boost_gain
+                v = max(-self.VMAX, min(self.VMAX, v))
+
+        self._prev_y_abs = y_abs
+        self.move(self.racket.rect.x + v)
+
 
 class FuzzyPlayer(Player):
     def __init__(self, racket: Racket, ball: Ball, board: Board):
@@ -276,6 +358,12 @@ class FuzzyPlayer(Player):
         self.cutoff_v = 0.10
         self._prev_y_abs = None
         self._boost_gain = 1.10
+
+        # plt.figure()
+        # for name, mf in self.x_mf.items():
+        #     plt.plot(self.x_universe, mf, label=name)
+        # plt.legend()
+        # plt.show()
 
     def _mf_x_map(self, x_val: float):
         return {n: fuzz.interp_membership(self.x_universe, mf, x_val)
